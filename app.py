@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -28,7 +27,6 @@ def limpar_numero(val):
     s = str(val).strip()
     if not s or s.lower() in ['nan', 'none', '-']:
         return 0.0
-    # Se tiver vírgula e ponto (ex: 1.234,56), remove ponto e troca vírgula
     if ',' in s and '.' in s:
         s = s.replace('.', '').replace(',', '.')
     elif ',' in s:
@@ -46,14 +44,12 @@ def processar_planilha_orcamento(file_bytes, filename):
     separa etapas de insumos e estrutura os dados para gráficos e RAG.
     """
     if filename.endswith('.csv'):
-        # Tenta detectar separador automaticamente
         sample = file_bytes.decode('utf-8', errors='ignore')[:2048]
         sep = ';' if sample.count(';') > sample.count(',') else ','
         df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=sep, header=None)
     else:
         df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
 
-    # Verifica se é uma planilha orçamentária padrão (procura a linha com 'Item' e 'Descrição')
     header_idx = None
     for idx, row in df_raw.iterrows():
         row_str = [str(x).strip().lower() for x in row.values]
@@ -61,29 +57,22 @@ def processar_planilha_orcamento(file_bytes, filename):
             header_idx = idx
             break
 
-    # Caso seja o formato específico de orçamento de obras (ex: Coren SP)
     if header_idx is not None:
-        # Pula a linha de subcabeçalho (M.O. / MAT. / Total) logo abaixo de 'Item'
         data_start = header_idx + 2
         df = df_raw.iloc[data_start:].copy().reset_index(drop=True)
 
-        # Mapeamento das 14 colunas padrão da planilha orçamentária
         colunas_orcamento = [
             'Item', 'Código', 'Banco', 'Descrição', 'Unidade', 'Quantidade',
             'Valor_Unit', 'Unit_BDI_MO', 'Unit_BDI_MAT', 'Unit_BDI_Total',
             'Total_MO', 'Total_MAT', 'Total_Geral', 'Peso_Percentual'
         ]
-        # Ajusta caso o arquivo tenha exatamente ou mais/menos colunas
         df = df.iloc[:, :len(colunas_orcamento)]
         df.columns = colunas_orcamento[:df.shape[1]]
 
-        # Remove linhas de rodapé (Totais ->, Total sem BDI, assinatura, vazias)
         df = df[df['Item'].notna()].copy()
         df['Item'] = df['Item'].astype(str).str.strip()
-        # Mantém apenas linhas onde Item começa com dígito (ex: 1, 1.1, 14.2.1)
         df = df[df['Item'].str.match(r'^\d+(\.\d+)*$')].copy()
 
-        # Limpeza numérica
         cols_num = [
             'Quantidade', 'Valor_Unit', 'Unit_BDI_MO', 'Unit_BDI_MAT',
             'Unit_BDI_Total', 'Total_MO', 'Total_MAT', 'Total_Geral', 'Peso_Percentual'
@@ -92,7 +81,6 @@ def processar_planilha_orcamento(file_bytes, filename):
             if col in df.columns:
                 df[col] = df[col].apply(limpar_numero)
 
-        # Identifica se a linha é uma Etapa/Grupo (sem código/unidade) ou um Insumo/Serviço
         df['Tipo_Linha'] = np.where(
             df['Código'].isna() | (df['Código'].astype(str).str.strip() == 'nan'),
             'Etapa / Subetapa',
@@ -100,13 +88,11 @@ def processar_planilha_orcamento(file_bytes, filename):
         )
         df['Etapa_Principal'] = df['Item'].apply(lambda x: x.split('.')[0])
         
-        # Mapeia o nome da Etapa Principal para cada subitem
         etapas_map = df[df['Item'].str.match(r'^\d+$')].set_index('Item')['Descrição'].to_dict()
         df['Nome_Etapa_Principal'] = df['Etapa_Principal'].map(etapas_map).fillna('Outros')
 
         return df, "orcamento"
 
-    # Fallback para CSV/Excel tabular genérico
     else:
         if filename.endswith('.csv'):
             sample = file_bytes.decode('utf-8', errors='ignore')[:2048]
@@ -129,7 +115,6 @@ class SpreadsheetRAG:
         self._build_index()
 
     def _build_index(self):
-        """Transforma cada linha da planilha em um documento textual rico para busca."""
         docs = []
         for idx, row in self.df.iterrows():
             if self.tipo == "orcamento":
@@ -160,7 +145,6 @@ class SpreadsheetRAG:
             self.tfidf_matrix = self.vectorizer.fit_transform(docs)
 
     def get_global_summary(self) -> str:
-        """Gera um resumo estatístico global para evitar erros de agregação no LLM."""
         if self.tipo == "orcamento":
             df_itens = self.df[self.df['Tipo_Linha'] == 'Item / Serviço']
             df_etapas = self.df[self.df['Item'].str.match(r'^\d+$')]
@@ -195,18 +179,15 @@ class SpreadsheetRAG:
             return f"RESUMO ESTATÍSTICO DO DATASET ({len(self.df)} linhas):\n{desc[:2500]}"
 
     def retrieve(self, query: str, top_k: int = 15) -> str:
-        """Recupera os trechos mais relevantes + resumo global."""
         if not self.documents:
             return "Nenhum dado disponível."
 
         query_vec = self.vectorizer.transform([query])
         similarities = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
         
-        # Pega os top_k índices mais similares
         top_indices = similarities.argsort()[-top_k:][::-1]
         retrieved_docs = [self.documents[i] for i in top_indices if similarities[i] > 0]
 
-        # Se a busca lexical não achar termos exatos, retorna amostra inicial
         if not retrieved_docs:
             retrieved_docs = self.documents[:top_k]
 
@@ -216,6 +197,30 @@ class SpreadsheetRAG:
             "\n".join(retrieved_docs)
         )
         return contexto
+
+
+def buscar_modelos_groq(api_key: str):
+    """Busca automaticamente os modelos de chat ativos na conta do Groq."""
+    modelos_padrao = [
+        "llama-3.1-8b-instant",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it"
+    ]
+    if not api_key:
+        return modelos_padrao
+    try:
+        client = Groq(api_key=api_key)
+        lista = client.models.list()
+        # Filtra modelos ativos removendo modelos exclusivos de áudio (whisper)
+        ativos = [
+            m.id for m in lista.data
+            if "whisper" not in m.id.lower() and "guard" not in m.id.lower()
+        ]
+        return sorted(ativos) if ativos else modelos_padrao
+    except Exception:
+        return modelos_padrao
 
 
 # --- INTERFACE STREAMLIT ---
@@ -233,15 +238,14 @@ with st.sidebar:
         help="Obtenha sua chave gratuita em console.groq.com"
     )
 
+    # Atualiza a lista de modelos disponíveis para a chave informada
+    lista_modelos = buscar_modelos_groq(groq_api_key)
+
     modelo_groq = st.selectbox(
         "Modelo LLM (Groq):",
-        options=[
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "mixtral-8x7b-32768",
-            "gemma2-9b-it"
-        ],
-        index=0
+        options=lista_modelos,
+        index=0,
+        help="Lista carregada automaticamente com os modelos liberados na sua chave Groq."
     )
 
     top_k_docs = st.slider(
@@ -268,10 +272,8 @@ if uploaded_file is not None:
     file_bytes = uploaded_file.getvalue()
     df, tipo_planilha = processar_planilha_orcamento(file_bytes, uploaded_file.name)
 
-    # Inicializa o motor RAG
     rag_engine = SpreadsheetRAG(df, tipo_planilha)
 
-    # Abas principais
     tab_dashboard, tab_dados, tab_rag = st.tabs([
         "📈 Dashboard & Gráficos",
         "📋 Tabela Estruturada",
@@ -286,7 +288,6 @@ if uploaded_file is not None:
             df_itens = df[df['Tipo_Linha'] == 'Item / Serviço'].copy()
             df_etapas = df[df['Item'].str.match(r'^\d+$')].copy()
 
-            # KPIs Principais
             total_geral = df_itens['Total_Geral'].sum()
             total_mo = df_itens['Total_MO'].sum()
             total_mat = df_itens['Total_MAT'].sum()
@@ -299,7 +300,6 @@ if uploaded_file is not None:
 
             st.divider()
 
-            # Gráficos Linha 1
             c1, c2 = st.columns([3, 2])
             with c1:
                 st.subheader("Custo Total por Etapa da Obra")
@@ -330,7 +330,6 @@ if uploaded_file is not None:
                 fig_pizza.update_layout(height=480)
                 st.plotly_chart(fig_pizza, use_container_width=True)
 
-            # Gráficos Linha 2
             st.divider()
             c3, c4 = st.columns(2)
             with c3:
@@ -364,7 +363,6 @@ if uploaded_file is not None:
                 st.plotly_chart(fig_banco, use_container_width=True)
 
         else:
-            # Dashboard Dinâmico para CSV/Excel Genérico
             st.subheader("Explorador Visual Automático")
             num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
             cat_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
@@ -404,7 +402,6 @@ if uploaded_file is not None:
 
         st.dataframe(df_view, use_container_width=True, height=500)
 
-        # Botão para baixar a versão limpa em CSV
         csv_limpo = df_view.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
         st.download_button(
             label="📥 Baixar Planilha Limpa em CSV",
@@ -425,7 +422,6 @@ if uploaded_file is not None:
             if "messages" not in st.session_state:
                 st.session_state.messages = []
 
-            # Sugestões rápidas de perguntas
             st.caption("Sugestões de perguntas:")
             cols_sug = st.columns(3)
             sugestoes = [
@@ -437,12 +433,10 @@ if uploaded_file is not None:
                 if cols_sug[i].button(sug, use_container_width=True):
                     st.session_state.prompt_sugerido = sug
 
-            # Renderiza histórico
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
-            # Entrada do usuário
             user_prompt = st.chat_input("Faça uma pergunta sobre os itens, valores, etapas ou bancos da planilha...")
             if "prompt_sugerido" in st.session_state:
                 user_prompt = st.session_state.pop("prompt_sugerido")
@@ -452,7 +446,6 @@ if uploaded_file is not None:
                 with st.chat_message("user"):
                     st.markdown(user_prompt)
 
-                # Recupera contexto via RAG
                 contexto_rag = rag_engine.retrieve(user_prompt, top_k=top_k_docs)
 
                 system_prompt = (
@@ -467,7 +460,6 @@ if uploaded_file is not None:
                     try:
                         client = Groq(api_key=groq_api_key)
                         
-                        # Monta histórico recente para manter coerência conversacional
                         api_messages = [{"role": "system", "content": system_prompt}]
                         for m in st.session_state.messages[-6:]:
                             api_messages.append({"role": m["role"], "content": m["content"]})
